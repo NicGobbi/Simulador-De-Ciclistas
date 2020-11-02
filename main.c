@@ -8,7 +8,7 @@
 #define MAX_THREADS_STARTED 5
 #define RANK_TABLE_ENTRIES_PER_REALLOC 5
 #define EMPTY_POSITION_VALUE -1
-#define QUANTUM_us 10000
+#define QUANTUM_us 1000
 #define TRACK_START 0
 #define INITIAL_LAP 0
 
@@ -33,8 +33,9 @@ typedef struct
   bool keep_going;
   bool started;
   bool lost;
-  bool broke;
 
+  unsigned long long int last_iteration;
+  unsigned int last_lap;
   speed speed;
   unsigned int lap;
   unsigned int pista_position;
@@ -43,36 +44,42 @@ typedef struct
 
 runner* runners;
 
-typedef struct node
+struct node
 {
   struct node* next;
   int which_runner;
   unsigned int size;
-} rank;
+};
 
-rank* rank_table;
-int rank_table_lines;
+typedef struct node rank;
+/* tabela dinamica que armazena o ranqueamento dos runners em cada volta */
+rank* per_lap_rank;
+int per_lap_rank_lines;
 
-typedef rank broken_runner;
+rank* race_final_rank;
+rank* final_broken_runners;
 
-broken_runner* broken_runners;
+typedef struct node broken_runner;
+broken_runner* current_lap_broken_runners;
 
-/* Funções para gerir o ranqueamento por volta da corrida */
-void push(rank* head, unsigned int runner_id)
+unsigned int variable_quantum;
+
+/* Funções para gerir pilhas */
+void push(struct node* head, unsigned int runner_id)
   {
-    rank* new_rank = malloc(sizeof(rank));
+    struct node* new_rank = malloc(sizeof(struct node));
     new_rank->which_runner = (int)runner_id;
     head->size++;
     new_rank->next = head->next;
     head->next = new_rank;
   }
 
-int pop(rank* head)
+int pop(struct node* head)
   {
     if(head->size > 0)
       {
         head->size--;
-        rank* garbage = head->next;
+        struct node* garbage = head->next;
         head->next = head->next->next;
         unsigned int runner_id = garbage->which_runner;
         free(garbage);
@@ -82,15 +89,36 @@ int pop(rank* head)
     return -1;
   }
 
-void print_pile(rank* head)
+void print_pile(struct node* head)
   {
     if (head != NULL)
       {
-        fprintf(stderr, " %d ", head->which_runner);
+        fprintf(stdout, " %d ", head->which_runner);
         print_pile(head->next);
       }
   }
-/* Fim de gestão do ranqueamento por volta da corrida */
+
+void print_final_rank(struct node* head)
+  {
+    if (head != NULL)
+      {
+        if(head->which_runner != -1)
+          fprintf(stdout, "Corredor: %d -- tf: %llds\n", head->which_runner, (runners[head->which_runner].last_iteration*60)/1000);
+        print_final_rank(head->next);
+      }
+  }
+
+void print_broken_runners(struct node* head)
+  {
+    if (head != NULL)
+      {
+        if(head->which_runner != -1)
+          fprintf(stdout, "Corredor: %d -- volta em que quebrou: %d\n", head->which_runner, runners[head->which_runner].last_lap);
+        print_broken_runners(head->next);
+      }
+  }
+
+/* Fim de gestão de pilhas */
 
 void print_pista()
   {
@@ -126,15 +154,17 @@ unsigned int determine_speed(int id)
     return runners[id].speed;
   }
 
-void break_with_chance(unsigned int runner_id)
+bool break_with_chance(unsigned int runner_id)
   {
     double random_number = rand()/(1.0*RAND_MAX);
     if(random_number >= 0.95)
       {
         pthread_mutex_lock(&broken_runner_lock);
-        push(broken_runners, runner_id);
+        push(current_lap_broken_runners, runner_id);
         pthread_mutex_unlock(&broken_runner_lock);
+        return true;
       }
+    return false;
   }
 
 void move_forward(int id) // Corredor com identificador <id> tenta se mover para a frente
@@ -188,18 +218,18 @@ void exit_race(int id) // Corredor toma ultimas ações para sair da corrida
 void set_runner_rank(unsigned int id) // Corredor sinaliza para vetor de ranks que terminou a volta
   {
     pthread_mutex_lock(&rank_lock);
-    if (rank_table_lines - 1 == runners[id].lap)
+    if (per_lap_rank_lines - 1 == runners[id].lap)
       {
-        rank_table = realloc(rank_table, sizeof(rank)*(RANK_TABLE_ENTRIES_PER_REALLOC + rank_table_lines));
-        for(int i = rank_table_lines; i < RANK_TABLE_ENTRIES_PER_REALLOC + rank_table_lines; i++)
+        per_lap_rank = realloc(per_lap_rank, sizeof(rank)*(RANK_TABLE_ENTRIES_PER_REALLOC + per_lap_rank_lines));
+        for(int i = per_lap_rank_lines; i < RANK_TABLE_ENTRIES_PER_REALLOC + per_lap_rank_lines; i++)
           {
-            rank_table[i].size = 0;
-            rank_table[i].next = NULL;
-            rank_table[i].which_runner = -1;
+            per_lap_rank[i].size = 0;
+            per_lap_rank[i].next = NULL;
+            per_lap_rank[i].which_runner = -1;
           }
-        rank_table_lines += RANK_TABLE_ENTRIES_PER_REALLOC;
+        per_lap_rank_lines += RANK_TABLE_ENTRIES_PER_REALLOC;
       }
-    push(&rank_table[runners[id].lap], id);
+    push(&per_lap_rank[runners[id].lap], id);
     runners[id].lap++;
     pthread_mutex_unlock(&rank_lock);
   }
@@ -221,12 +251,13 @@ void * runner_thread(void * a) // Thread que representa um corredor
                   //fprintf(stderr, "here\n");
                   if(runners[*id].pista_position == TRACK_START && iterations != 0) // uma volta se passou e não é a primeira
                     {
-                      set_runner_rank(*id);
                       current_speed = determine_speed(*id);
                       if(runners[*id].lap % 6 == 0)
                         {
-                          break_with_chance(*id);
+                          if(break_with_chance(*id))
+                            break;
                         }
+                      set_runner_rank(*id);
                     }
                   break;
 
@@ -238,12 +269,13 @@ void * runner_thread(void * a) // Thread que representa um corredor
                       move_forward(*id);
                       if(runners[*id].pista_position == TRACK_START && iterations != 0) // uma volta se passou e não é a primeira
                         {
-                          set_runner_rank(*id);
                           current_speed = determine_speed(*id);
                           if(runners[*id].lap % 6 == 0)
                             {
-                              break_with_chance(*id);
+                              if(break_with_chance(*id))
+                                break;
                             }
+                          set_runner_rank(*id);
                         }
                     }
                   break;
@@ -252,7 +284,7 @@ void * runner_thread(void * a) // Thread que representa um corredor
             iterations++;
           }
         runners[*id].arrive = true;          
-        while(runners[*id].keep_going == false) usleep(QUANTUM_us);
+        while(runners[*id].keep_going == false) usleep(variable_quantum);
         if (runners[*id].lost)
           break;
         runners[*id].keep_going = false;
@@ -269,12 +301,11 @@ void * coordinator_thread(void * a) // Thread que faz a barreira de sincronizaç
     int started_runners = 0;
     int alternate_start_position = 0;
     int aux;
-    fprintf(stderr, "Thread coordinator started\n");
     while(1)
       {
         for(int i = 0; i < *runner_count; i++)
           {
-            while (runners[i].arrive == false) usleep(QUANTUM_us);
+            while (runners[i].arrive == false) usleep(variable_quantum);
             if(!runners[i].lost)
               runners[i].arrive = false;
           }
@@ -295,62 +326,70 @@ void * coordinator_thread(void * a) // Thread que faz a barreira de sincronizaç
             alternate_start_position = (alternate_start_position + MAX_THREADS_STARTED) % 2*MAX_THREADS_STARTED;
           }
 
-        print_pista();
-        fprintf(stderr, "\n");
-        fprintf(stderr, "runners_left: %d", runners_left);
-        fprintf(stderr, "\n");
-        fprintf(stderr, "rank_table[current_lap].size: %d", rank_table[current_lap].size);
-        fprintf(stderr, "\n");
-        fprintf(stderr, "rank_table_lines: %d", rank_table_lines);
-        fprintf(stderr, "\n");
-        fprintf(stderr, "current_lap: %d", current_lap);
-        fprintf(stderr, "\n");
-        fprintf(stderr, "Rank line: ");
-        print_pile(&rank_table[current_lap]);
-        fprintf(stderr, "\n");
-        fprintf(stderr, "Broken line: ");
-        print_pile(broken_runners);
-        fprintf(stderr, "\n");
-        fprintf(stderr, "broken runners size: %d", broken_runners->size);
-        fprintf(stderr, "\n");
-        fprintf(stderr, "iteration: %d", iterations);
-        fprintf(stderr, "\n");
+        // print_pista();
+        // fprintf(stderr, "\n");
+        // fprintf(stderr, "runners_left: %d", runners_left);
+        // fprintf(stderr, "\n");
+        // fprintf(stderr, "per_lap_rank[current_lap].size: %d", per_lap_rank[current_lap].size);
+        // fprintf(stderr, "\n");
+        // fprintf(stderr, "per_lap_rank_lines: %d", per_lap_rank_lines);
+        // fprintf(stderr, "\n");
+        // fprintf(stderr, "current_lap: %d", current_lap);
+        // fprintf(stderr, "\n");
+        // fprintf(stderr, "Volta %d: ", current_lap);
+        // print_pile(&per_lap_rank[current_lap]);
+        // fprintf(stderr, "\n");
+        // fprintf(stderr, "Broken line: ");
+        // print_pile(current_lap_broken_runners);
+        // fprintf(stderr, "\n");
+        // fprintf(stderr, "broken runners size: %d", current_lap_broken_runners->size);
+        // fprintf(stderr, "\n");
+        // fprintf(stderr, "iteration: %d", iterations);
+        // fprintf(stderr, "\n");
         /* Se uma volta se passou */
-        // fprintf(stderr, " %d ", rank_table[current_lap].size);
-        // fprintf(stderr, " %d ", rank_table_lines);
+        // fprintf(stderr, " %d ", per_lap_rank[current_lap].size);
+        // fprintf(stderr, " %d ", per_lap_rank_lines);
         // fprintf(stderr, " %d ", runners_left);
-        if(current_lap < rank_table_lines && rank_table[current_lap].size == runners_left)
+        if(current_lap < per_lap_rank_lines && per_lap_rank[current_lap].size >= runners_left)
           {
-            // fprintf(stderr, "\n");
-            // print_pile(&rank_table[current_lap]);
-            // fprintf(stderr, "\n");
-            if(current_lap % 2 == 0)
+            if(current_lap % 2 == 1)
               {
-                int last_positioned_id = rank_table[current_lap].next->which_runner;
-                runners[last_positioned_id].lost = true;  // ultimo colocado da volta. Aviso que perdeu.
-                runners[last_positioned_id].keep_going = true;  // mando continuar.
-                pthread_join(runners[last_positioned_id].thread_id, NULL);
-                runners_left--;
+                int last_positioned_id = per_lap_rank[current_lap].next->which_runner;
+                if(!runners[last_positioned_id].lost)
+                  {
+                    runners[last_positioned_id].lost = true;  // ultimo colocado da volta. Aviso que perdeu.
+                    runners[last_positioned_id].keep_going = true;  // mando continuar.
+                    pthread_join(runners[last_positioned_id].thread_id, NULL);
+                    runners_left--;
+                    runners[last_positioned_id].last_lap = current_lap;
+                    runners[last_positioned_id].last_iteration = iterations;
+                    push(race_final_rank, last_positioned_id);
+                  }
               }
+            fprintf(stdout, "Volta %d: ", current_lap);
+            print_pile(&per_lap_rank[current_lap]);
+            fprintf(stdout, "\n");
             current_lap++;
-            //scanf("%d", &aux);
-          }
-        else if(rank_table[current_lap].size > runners_left)
-          {
-            exit(1);
-          }
-        while(broken_runners->size > 0 && runners_left > 5)
-          {
-            unsigned int broken = pop(broken_runners);
-            if (!runners[broken].lost)  // ultimo colocado da volta. Aviso que perdeu.
+            if(runners_left == 160)
               {
-                runners[broken].lost = true;
+                variable_quantum = 100;
+              }
+          }
+        while(current_lap_broken_runners->size > 0 && runners_left > 5)
+          {
+            unsigned int broken = pop(current_lap_broken_runners);
+            if (!runners[broken].lost)  
+              {
+                runners[broken].lost = true;  // ultimo colocado da volta. Aviso que perdeu.
                 runners[broken].keep_going = true;  // mando continuar.
                 pthread_join(runners[broken].thread_id, NULL);
                 runners_left--;
-                fprintf(stderr, "runner %d broke", broken);
+                runners[broken].last_lap = current_lap;
+                runners[broken].last_iteration = iterations;
+                push(final_broken_runners, broken);
+                //fprintf(stderr, "\nCiclista %d quebrou\n", broken);
               }
-            scanf("%d", &aux);
+            // scanf("%d", &aux);
           }
         if (runners_left == 0)
           break;
@@ -358,18 +397,21 @@ void * coordinator_thread(void * a) // Thread que faz a barreira de sincronizaç
         iterations++;
         for(int i = 0; i < *runner_count; i++) runners[i].keep_going = true;
       }
+    fprintf(stdout, "Rankeamento da corrida:\n");
+    print_final_rank(race_final_rank);
+    fprintf(stdout, "\nCorredores que quebraram:\n");
+    print_broken_runners(final_broken_runners);
   }
 
-int main()
+int main(int argc, char *argv[])
   {
-    // initializacoes
+    // inicializacoes
     srand(time(0));
-    printf("How many worker threads?");
     int thread_count;
-    scanf("%d", &thread_count);
-    printf("Track size");
-    scanf("%d", &d);
+    d = atoi(argv[1]);
+    thread_count = atoi(argv[2]);
     runners_left = thread_count;
+    variable_quantum = QUANTUM_us;
     runners = malloc(sizeof(runner)*thread_count);
     pista_locks = malloc(sizeof(pthread_mutex_t)*d);
     pista = malloc(sizeof(int*)*d);
@@ -382,24 +424,35 @@ int main()
             pista[i][j] = EMPTY_POSITION_VALUE;
           }
       }
-    print_pista();
+    //print_pista();
     pthread_mutex_init(&broken_runner_lock, NULL);
     /* iniciando tabela dinamica de rankeamento */
     pthread_mutex_init(&rank_lock, NULL);
-    rank_table = malloc(sizeof(rank)*RANK_TABLE_ENTRIES_PER_REALLOC);
-    rank_table_lines = RANK_TABLE_ENTRIES_PER_REALLOC;
+    per_lap_rank = malloc(sizeof(rank)*RANK_TABLE_ENTRIES_PER_REALLOC);
+    per_lap_rank_lines = RANK_TABLE_ENTRIES_PER_REALLOC;
     for(int i = 0; i < RANK_TABLE_ENTRIES_PER_REALLOC; i++)
       {
-        rank_table[i].size = 0;
-        rank_table[i].next = NULL;
-        rank_table[i].which_runner = -1;
+        per_lap_rank[i].size = 0;
+        per_lap_rank[i].next = NULL;
+        per_lap_rank[i].which_runner = -1;
       }
 
-    /* iniciando pilha de broken runners */
-    broken_runners = malloc(sizeof(broken_runner));
-    (*broken_runners).size = 0;
-    (*broken_runners).next = NULL;
-    (*broken_runners).which_runner = -1;
+    /* iniciando pilha de broken runners por volta*/
+    current_lap_broken_runners = malloc(sizeof(broken_runner));
+    (*current_lap_broken_runners).size = 0;
+    (*current_lap_broken_runners).next = NULL;
+    (*current_lap_broken_runners).which_runner = -1;
+
+    /* inicializando rank final e pilha com todos os ciclistas que quebraram */
+    final_broken_runners = malloc(sizeof(broken_runner));
+    (*final_broken_runners).size = 0;
+    (*final_broken_runners).next = NULL;
+    (*final_broken_runners).which_runner = -1;
+
+    race_final_rank = malloc(sizeof(broken_runner));
+    (*race_final_rank).size = 0;
+    (*race_final_rank).next = NULL;
+    (*race_final_rank).which_runner = -1;
 
     /* iniciando threads corredoras*/
     for(int i = 0; i < thread_count; i++)
@@ -408,6 +461,8 @@ int main()
         runners[i].started = false;
         runners[i].lost = false;
         runners[i].speed = SPEED_30KM_H;
+        runners[i].keep_going = false;
+        runners[i].arrive = true;
         pthread_create(&runners[i].thread_id, NULL, runner_thread, &runners[i].runner_id);
       }
     pthread_t coord;
