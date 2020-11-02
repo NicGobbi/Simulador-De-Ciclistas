@@ -56,8 +56,8 @@ typedef struct node rank;
 rank* per_lap_rank;
 int per_lap_rank_lines;
 
-rank* race_final_rank;
-rank* final_broken_runners;
+rank* race_final_rank; // Rankeamento final da corrida
+rank* final_broken_runners; // Todos os corredores que quebraram
 
 typedef struct node broken_runner;
 broken_runner* current_lap_broken_runners;
@@ -249,7 +249,7 @@ void * runner_thread(void * a) // Thread que representa um corredor
                 case SPEED_60KM_H:
                   move_forward(*id);
                   //fprintf(stderr, "here\n");
-                  if(runners[*id].pista_position == TRACK_START && iterations != 0) // uma volta se passou e não é a primeira
+                  if(runners[*id].pista_position == TRACK_START) // uma volta se passou 
                     {
                       current_speed = determine_speed(*id);
                       if(runners[*id].lap % 6 == 0)
@@ -267,7 +267,7 @@ void * runner_thread(void * a) // Thread que representa um corredor
                     {
                       //fprintf(stderr, "here\n");
                       move_forward(*id);
-                      if(runners[*id].pista_position == TRACK_START && iterations != 0) // uma volta se passou e não é a primeira
+                      if(runners[*id].pista_position == TRACK_START) // uma volta se passou 
                         {
                           current_speed = determine_speed(*id);
                           if(runners[*id].lap % 6 == 0)
@@ -406,7 +406,7 @@ void * coordinator_thread(void * a) // Thread que faz a barreira de sincronizaç
 int main(int argc, char *argv[])
   {
     // inicializacoes
-    srand(time(0));
+    srand(time(NULL));
     int thread_count;
     d = atoi(argv[1]);
     thread_count = atoi(argv[2]);
