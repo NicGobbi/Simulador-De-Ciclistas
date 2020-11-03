@@ -1,0 +1,23 @@
+	Command being timed: "./main.exe 2080 500"
+	User time (seconds): 529.37
+	System time (seconds): 1265.62
+	Percent of CPU this job got: 119%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 24:57.22
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 5844
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 1574
+	Voluntary context switches: 274824187
+	Involuntary context switches: 281256
+	Swaps: 0
+	File system inputs: 24
+	File system outputs: 480
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

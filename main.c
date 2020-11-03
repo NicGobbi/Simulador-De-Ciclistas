@@ -9,6 +9,7 @@
 #define RANK_TABLE_ENTRIES_PER_REALLOC 5
 #define EMPTY_POSITION_VALUE -1
 #define QUANTUM_us 1000
+#define USE_VARIABLE_QUANTUM 1
 #define TRACK_START 0
 #define INITIAL_LAP 0
 
@@ -398,13 +399,16 @@ void * coordinator_thread(void * a) // Thread que faz a barreira de sincronizaç
             print_pile(per_lap_rank[current_lap].next);
             fprintf(stdout, "\n");
             current_lap++;
-            if(runners_left == 160)
+            if(USE_VARIABLE_QUANTUM)
               {
-                variable_quantum = 100;
-              }
-            else if(runners_left == 300)
-              {
-                variable_quantum = 500;
+                if(runners_left == 160)
+                  {
+                    variable_quantum = 100;
+                  }
+                else if(runners_left == 300)
+                  {
+                    variable_quantum = 500;
+                  }
               }
           }
         else if(per_lap_rank[current_lap].size >= per_lap_runners[current_lap])
@@ -437,6 +441,18 @@ int main(int argc, char *argv[])
     thread_count = atoi(argv[2]);
     runners_left = thread_count;
     variable_quantum = QUANTUM_us;
+    if(USE_VARIABLE_QUANTUM)
+      {
+        if(thread_count > 300)
+          {
+            variable_quantum = 1000;
+          }
+        else
+          {
+            variable_quantum = 100;
+          }
+      }
+    
     runners = malloc(sizeof(runner)*thread_count);
     pista_locks = malloc(sizeof(pthread_mutex_t)*d);
     pista = malloc(sizeof(int*)*d);
