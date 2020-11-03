@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <string.h>
 
 #define MAX_RUNNERS_PER_METER 10
 #define MAX_THREADS_STARTED 5
@@ -15,13 +16,14 @@
 
 #define SPEED_30KM_H 1
 #define SPEED_60KM_H 2
-#define SPEED_90KM_H 3
+#define SPEED_90KM_H 3 // Nao foi implementada
 typedef int speed;
 
 pthread_mutex_t* pista_locks;
 pthread_mutex_t rank_lock;
 pthread_mutex_t broken_runner_lock;
 
+bool debug = false;
 int** pista;
 int d;
 int thread_count;
@@ -44,7 +46,7 @@ typedef struct
   unsigned int pista_position;
   unsigned int pista_line;
 } runner;
-
+/* Salva informações sobre as threads corredoreas */
 runner* runners;
 
 struct node
@@ -54,16 +56,16 @@ struct node
   unsigned int size;
 };
 
-typedef struct node rank;
-/* tabela dinamica que armazena o ranqueamento dos runners em cada volta */
-rank* per_lap_rank;
+typedef struct node runner_pile_t;
+/* lista dinamica de pilhas que armazena o ranqueamento dos runners em cada volta (O primeiro da pilha eh o ultimo colocado)*/
+runner_pile_t* per_lap_rank;
 int per_lap_rank_lines;
 
-rank* race_final_rank; // Rankeamento final da corrida
-rank* final_broken_runners; // Todos os corredores que quebraram
+runner_pile_t* race_early_winners; // Corredores que ganharam antes dos mais atrasados serem eliminados DELETAR
+runner_pile_t* race_final_rank; // Rankeamento final da corrida
+runner_pile_t* final_broken_runners; // Todos os corredores que quebraram
 
-typedef struct node broken_runner;
-broken_runner* current_lap_broken_runners;
+runner_pile_t* current_lap_broken_runners; // Corredores que quebraram por volta
 
 unsigned int variable_quantum;
 
@@ -96,7 +98,7 @@ void print_pile(struct node* head)
   {
     if (head != NULL)
       {
-        fprintf(stdout, " %d ", head->which_runner);
+        fprintf(stderr, " %d ", head->which_runner);
         print_pile(head->next);
       }
   }
@@ -123,6 +125,7 @@ void print_broken_runners(struct node* head)
 
 /* Fim de gestão de pilhas */
 
+/* Atualiza a lista de quantos corredores devem ter por volta no caso em que algum corredor quebra*/
 void update_runners_per_lap(unsigned int id)
   {
     for(int i = runners[id].last_lap; i < thread_count*2; i++)
@@ -151,7 +154,6 @@ void print_pista()
 unsigned int determine_speed(int id)
   {
     double random_number = rand()/(1.0*RAND_MAX);
-    //fprintf(stderr, "%f", random_number);
     if(runners[id].speed == SPEED_30KM_H)
       {
         if(random_number >= 0.2)
@@ -165,20 +167,22 @@ unsigned int determine_speed(int id)
     return runners[id].speed;
   }
 
-bool break_with_chance(unsigned int runner_id)
+/* Vê-se o corredor deve quebrar ou não e sinaliza para a thread coordenadora pela pilha current_lap_broken_runners*/
+bool break_with_chance(unsigned int id)
   {
     double random_number = rand()/(1.0*RAND_MAX);
     if(random_number >= 0.95)
       {
         pthread_mutex_lock(&broken_runner_lock);
-        push(current_lap_broken_runners, runner_id);
+        push(current_lap_broken_runners, id);
         pthread_mutex_unlock(&broken_runner_lock);
+        fprintf(stderr, "Corredor %d quebrou\n", id);
         return true;
       }
     return false;
   }
 
-void move_forward(int id) // Corredor com identificador <id> tenta se mover para a frente
+void move_forward(int id)
   {
     int current_position = runners[id].pista_position;
     int current_line = runners[id].pista_line;
@@ -217,16 +221,19 @@ void move_forward(int id) // Corredor com identificador <id> tenta se mover para
     pthread_mutex_unlock(&pista_locks[current_position]);
   }
 
-void exit_race(int id) // Corredor toma ultimas ações para sair da corrida
+/* Funcao chamda por um corredor quando a thread coordenadora sinaliza que ele deve sair da corrida */
+void exit_race(int id)
   {
     int current_position = runners[id].pista_position;
     int current_line = runners[id].pista_line;
     pthread_mutex_lock(&pista_locks[current_position]);
     pista[current_position][current_line] = EMPTY_POSITION_VALUE;
     pthread_mutex_unlock(&pista_locks[current_position]);
+    runners[id].started = false; // para o caso em que a thread deveria ter sido eliminada antes mas acabou se apressando -> sai da corrida e espera coordenador coletar seu ranking e terminar a thread 
   }
 
-void remove_runner(int id, int current_iteration, bool lost) // Função para coordenador retirar um corredor da corrida
+/* Funcao chamada pela thread coordenadora para retirar um corredor da partida */
+void remove_runner(int id, int current_iteration, bool lost)
   {
     if(!runners[id].lost)
       {
@@ -248,12 +255,14 @@ void remove_runner(int id, int current_iteration, bool lost) // Função para co
       }
   }
 
-void set_runner_rank(unsigned int id) // Corredor sinaliza para vetor de ranks que terminou a volta
+/* Funcao chamada pelo corredor para adicionar a sua posição em determinada volta na pilha correspondente a volta */
+void set_runner_rank(unsigned int id)
   {
     pthread_mutex_lock(&rank_lock);
+    /* Expande lista de ponteiros que apontam para pilhas a medida que corredores avançam na quantidade de voltas */
     if (per_lap_rank_lines - 1 == runners[id].lap)
       {
-        per_lap_rank = realloc(per_lap_rank, sizeof(rank)*(RANK_TABLE_ENTRIES_PER_REALLOC + per_lap_rank_lines));
+        per_lap_rank = realloc(per_lap_rank, sizeof(runner_pile_t)*(RANK_TABLE_ENTRIES_PER_REALLOC + per_lap_rank_lines));
         for(int i = per_lap_rank_lines; i < RANK_TABLE_ENTRIES_PER_REALLOC + per_lap_rank_lines; i++)
           {
             per_lap_rank[i].size = 0;
@@ -263,12 +272,15 @@ void set_runner_rank(unsigned int id) // Corredor sinaliza para vetor de ranks q
         per_lap_rank_lines += RANK_TABLE_ENTRIES_PER_REALLOC;
       }
     push(&per_lap_rank[runners[id].lap], id);
-    pthread_mutex_unlock(&rank_lock);
+    if(per_lap_rank[runners[id].lap].size == per_lap_runners[runners[id].lap] && runners[id].lap % 2 == 1)
+      exit_race(id);
     runners[id].lap++;
+    pthread_mutex_unlock(&rank_lock);
   }
 /* Fim de funcoes para gerir os corredores */
 
-void * runner_thread(void * a) // Thread que representa um corredor
+/* Thread que representa um corredor */
+void * runner_thread(void * a)
   {
     int* id = (int*)a;
     speed current_speed = runners[*id].speed;
@@ -281,7 +293,6 @@ void * runner_thread(void * a) // Thread que representa um corredor
               {
                 case SPEED_60KM_H:
                   move_forward(*id);
-                  //fprintf(stderr, "here\n");
                   if(runners[*id].pista_position == TRACK_START) // uma volta se passou 
                     {
                       current_speed = determine_speed(*id);
@@ -295,10 +306,8 @@ void * runner_thread(void * a) // Thread que representa um corredor
                   break;
 
                 case SPEED_30KM_H:
-                  //fprintf(stderr, "\n%p\n iterations->%d\n", &current_speed, iterations);
                   if(iterations % 2 == 0)
                     {
-                      //fprintf(stderr, "here\n");
                       move_forward(*id);
                       if(runners[*id].pista_position == TRACK_START) // uma volta se passou 
                         {
@@ -313,7 +322,6 @@ void * runner_thread(void * a) // Thread que representa um corredor
                     }
                   break;
               }
-            //fprintf(stderr, "%d", iterations);
             iterations++;
           }
         runners[*id].arrive = true;          
@@ -322,11 +330,12 @@ void * runner_thread(void * a) // Thread que representa um corredor
           break;
         runners[*id].keep_going = false;
       }
-    exit_race(*id);
     runners[*id].arrive = true;
+    exit_race(*id);
   }
 
-void * coordinator_thread(void * a) // Thread que faz a barreira de sincronização e toma decisões (excluir threads perdedoras por exemplo)
+/* Thread que coordena os corredores. (barreira de sincronização, retira corredores, atualiza o quantum baseado na quantidade de corredores...) */
+void * coordinator_thread(void * a) 
   {
     int iterations = 0;
     int current_lap = 0;
@@ -342,7 +351,8 @@ void * coordinator_thread(void * a) // Thread que faz a barreira de sincronizaç
             if(!runners[i].lost)
               runners[i].arrive = false;
           }
-        /* inicio da corrida */
+
+        /* adicionar corredores */
         int threads_to_start = *runner_count - started_runners;
         if(threads_to_start > 0 && iterations % 2 == 0)
           {
@@ -358,47 +368,39 @@ void * coordinator_thread(void * a) // Thread que faz a barreira de sincronizaç
               }
             alternate_start_position = (alternate_start_position + MAX_THREADS_STARTED) % 2*MAX_THREADS_STARTED;
           }
-
-        // print_pista();
-        // fprintf(stderr, "\n");
-        // fprintf(stderr, "per_lap_runners[current_lap]: %d", per_lap_runners[current_lap]);
-        // fprintf(stderr, "\n");
-        // fprintf(stderr, "per_lap_rank[current_lap].size: %d", per_lap_rank[current_lap].size);
-        // fprintf(stderr, "\n");
-        // fprintf(stderr, "per_lap_rank_lines: %d", per_lap_rank_lines);
-        // fprintf(stderr, "\n");
-        // fprintf(stderr, "current_lap: %d", current_lap);
-        // fprintf(stderr, "\n");
-        // fprintf(stderr, "Runners left %d: ", runners_left);
-        // print_pile(&per_lap_rank[current_lap]);
-        // fprintf(stderr, "\n");
-        // fprintf(stderr, "Broken line: ");
-        // print_pile(current_lap_broken_runners);
-        // fprintf(stderr, "\n");
-        // fprintf(stderr, "broken runners size: %d", current_lap_broken_runners->size);
-        // fprintf(stderr, "\n");
-        // fprintf(stderr, "iteration: %d", iterations);
-        // fprintf(stderr, "\n");
-        /* Se uma volta se passou */
-        // for(int i = 0; i < 2*thread_count; i++)
-        //   {
-        //     fprintf(stderr, "%d ", per_lap_runners[i]);
-        //   }
-        // fprintf(stderr, "\n");
-        // fprintf(stderr, " %d ", per_lap_rank[current_lap].size);
-        // fprintf(stderr, " %d ", per_lap_rank_lines);
-        // fprintf(stderr, " %d ", runners_left);
-        if(current_lap < per_lap_rank_lines && per_lap_rank[current_lap].size == per_lap_runners[current_lap])
+        if(debug)
           {
+            print_pista();
+            fprintf(stderr, "\nper_lap_runners[current_lap]: %d\n", per_lap_runners[current_lap]);
+            fprintf(stderr, "\nper_lap_rank[current_lap].size: %d\n", per_lap_rank[current_lap].size);
+            fprintf(stderr, "\nrunners_left: %d\n", runners_left);
+            fprintf(stderr, "Volta %d: ", current_lap);
+            print_pile(per_lap_rank[current_lap].next);
+            fprintf(stderr, "\n");
+          }
+
+        /* Uma volta se passou. current_lap é a volta em que o último corredor está */
+        if(per_lap_rank[current_lap].size == per_lap_runners[current_lap])
+          {
+            fprintf(stderr, "Volta %d: ", current_lap);
+            print_pile(per_lap_rank[current_lap].next);
+            fprintf(stderr, "per_lap_runners[current_lap]: %d, per_lap_rank[current_lap].size: %d\n", per_lap_runners[current_lap], per_lap_rank[current_lap].size);
+            if(runners_left == 1 && per_lap_rank[current_lap].size != 1)
+              {
+                fprintf(stderr, "Erro");
+                exit(1);
+              }
+            else if(runners_left == 1)
+              {
+                int last_positioned_id = per_lap_rank[current_lap].next->which_runner;
+                remove_runner(last_positioned_id, iterations, true);
+                break;
+              }
             if(current_lap % 2 == 1)
               {
                 int last_positioned_id = per_lap_rank[current_lap].next->which_runner;
                 remove_runner(last_positioned_id, iterations, true);
               }
-            fprintf(stdout, "Volta %d: ", current_lap);
-            print_pile(per_lap_rank[current_lap].next);
-            fprintf(stdout, "\n");
-            current_lap++;
             if(USE_VARIABLE_QUANTUM)
               {
                 if(runners_left == 160)
@@ -410,20 +412,18 @@ void * coordinator_thread(void * a) // Thread que faz a barreira de sincronizaç
                     variable_quantum = 500;
                   }
               }
+            current_lap++;
           }
         else if(per_lap_rank[current_lap].size >= per_lap_runners[current_lap])
           {
             pop(&per_lap_rank[current_lap]); 
           }
+        /* Retira corredores que quebraram na última volta */
         while(current_lap_broken_runners->size > 0 && runners_left > 5)
           {
             unsigned int broken = pop(current_lap_broken_runners);
             remove_runner(broken, iterations, false);
-            // scanf("%d", &aux);
           }
-        if (runners_left == 0)
-          break;
-        //fprintf(stderr, "ready for next run.");
         iterations++;
         for(int i = 0; i < *runner_count; i++) runners[i].keep_going = true;
       }
@@ -439,6 +439,8 @@ int main(int argc, char *argv[])
     srand(time(NULL));
     d = atoi(argv[1]);
     thread_count = atoi(argv[2]);
+    if(argv[3] != NULL && strcmp(argv[3],"-d") == 0)
+      debug = true;
     runners_left = thread_count;
     variable_quantum = QUANTUM_us;
     if(USE_VARIABLE_QUANTUM)
@@ -452,7 +454,6 @@ int main(int argc, char *argv[])
             variable_quantum = 100;
           }
       }
-    
     runners = malloc(sizeof(runner)*thread_count);
     pista_locks = malloc(sizeof(pthread_mutex_t)*d);
     pista = malloc(sizeof(int*)*d);
@@ -465,11 +466,10 @@ int main(int argc, char *argv[])
             pista[i][j] = EMPTY_POSITION_VALUE;
           }
       }
-    //print_pista();
-    pthread_mutex_init(&broken_runner_lock, NULL);
-    /* iniciando tabela dinamica de rankeamento */
+
+    /* inicializando tabela dinamica de rankeamento */
     pthread_mutex_init(&rank_lock, NULL);
-    per_lap_rank = malloc(sizeof(rank)*RANK_TABLE_ENTRIES_PER_REALLOC);
+    per_lap_rank = malloc(sizeof(runner_pile_t)*RANK_TABLE_ENTRIES_PER_REALLOC);
     per_lap_rank_lines = RANK_TABLE_ENTRIES_PER_REALLOC;
     for(int i = 0; i < RANK_TABLE_ENTRIES_PER_REALLOC; i++)
       {
@@ -478,7 +478,7 @@ int main(int argc, char *argv[])
         per_lap_rank[i].which_runner = -1;
       }
 
-    /* iniciando vetor com quantidade estimada de corredores por volta */
+    /* inicializando vetor com quantidade estimada de corredores por volta */
     per_lap_runners = malloc(sizeof(int)*thread_count*2);
     for(int i = 0; i < 2*thread_count; i+=2)
       {
@@ -486,22 +486,29 @@ int main(int argc, char *argv[])
         per_lap_runners[i + 1] = thread_count - i/2;
       }
 
-    /* iniciando pilha de broken runners por volta*/
-    current_lap_broken_runners = malloc(sizeof(broken_runner));
+    /* iniciando pilha de broken runners por volta + mutex que garante acesso a pilha*/
+    pthread_mutex_init(&broken_runner_lock, NULL);
+    current_lap_broken_runners = malloc(sizeof(runner_pile_t));
     (*current_lap_broken_runners).size = 0;
     (*current_lap_broken_runners).next = NULL;
     (*current_lap_broken_runners).which_runner = -1;
 
     /* inicializando rank final e pilha com todos os ciclistas que quebraram */
-    final_broken_runners = malloc(sizeof(broken_runner));
+    final_broken_runners = malloc(sizeof(runner_pile_t));
     (*final_broken_runners).size = 0;
     (*final_broken_runners).next = NULL;
     (*final_broken_runners).which_runner = -1;
 
-    race_final_rank = malloc(sizeof(broken_runner));
+    race_final_rank = malloc(sizeof(runner_pile_t));
     (*race_final_rank).size = 0;
     (*race_final_rank).next = NULL;
     (*race_final_rank).which_runner = -1;
+
+    /* inicializando pilha de corredores que ganham antes dos mais atrasados serem eliminados */ // DELETAR
+    race_early_winners = malloc(sizeof(runner_pile_t));
+    (*race_early_winners).size = 0;
+    (*race_early_winners).next = NULL;
+    (*race_early_winners).which_runner = -1;
 
     /* iniciando threads corredoras*/
     for(int i = 0; i < thread_count; i++)
@@ -511,7 +518,7 @@ int main(int argc, char *argv[])
         runners[i].lost = false;
         runners[i].speed = SPEED_30KM_H;
         runners[i].keep_going = false;
-        runners[i].arrive = true;
+        runners[i].arrive = false;
         pthread_create(&runners[i].thread_id, NULL, runner_thread, &runners[i].runner_id);
       }
     pthread_t coord;
