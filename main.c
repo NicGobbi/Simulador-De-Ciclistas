@@ -14,9 +14,11 @@
 #define TRACK_START 0
 #define INITIAL_LAP 0
 
-#define SPEED_30KM_H 1
-#define SPEED_60KM_H 2
-#define SPEED_90KM_H 3 // Nao foi implementada
+#define SPEED_30KM_H_60ms 2
+#define SPEED_60KM_H_60ms 1
+#define SPEED_30KM_H_20ms 6
+#define SPEED_60KM_H_20ms 3
+#define SPEED_90KM_H_20ms 2
 typedef int speed;
 
 pthread_mutex_t* pista_locks;
@@ -42,6 +44,7 @@ typedef struct
   unsigned long long int last_iteration;
   unsigned int last_lap;
   speed speed;
+  bool at_two_last_laps;
   unsigned int lap;
   unsigned int pista_position;
   unsigned int pista_line;
@@ -61,7 +64,6 @@ typedef struct node runner_pile_t;
 runner_pile_t* per_lap_rank;
 int per_lap_rank_lines;
 
-runner_pile_t* race_early_winners; // Corredores que ganharam antes dos mais atrasados serem eliminados DELETAR
 runner_pile_t* race_final_rank; // Rankeamento final da corrida
 runner_pile_t* final_broken_runners; // Todos os corredores que quebraram
 
@@ -125,7 +127,7 @@ void print_broken_runners(struct node* head)
 
 /* Fim de gestão de pilhas */
 
-/* Atualiza a lista de quantos corredores devem ter por volta no caso em que algum corredor quebra*/
+/* Atualiza a lista de quantos corredores devem ter por volta no caso em que algum corredor quebre*/
 void update_runners_per_lap(unsigned int id)
   {
     for(int i = runners[id].last_lap; i < thread_count*2; i++)
@@ -151,23 +153,25 @@ void print_pista()
   }
 
 /* Funções para gerir os corredores */
-unsigned int determine_speed(int id)
+void determine_speed(int id)
   {
-    double random_number = rand()/(1.0*RAND_MAX);
-    if(runners[id].speed == SPEED_30KM_H)
+    if(!runners[id].at_two_last_laps)  // nas duas ultimas voltas quem determina a velocidade eh a thread coordenadora
       {
-        if(random_number >= 0.2)
-          runners[id].speed = SPEED_60KM_H;
-      }
-    else if(runners[id].speed == SPEED_60KM_H)
-      {
-        if(random_number >= 0.6)
-          runners[id].speed = SPEED_30KM_H;
-      }
-    return runners[id].speed;
+        double random_number = rand()/(1.0*RAND_MAX);
+        if(runners[id].speed == SPEED_30KM_H_60ms)
+          {
+            if(random_number >= 0.2)
+              runners[id].speed = SPEED_60KM_H_60ms;
+          }
+        else if(runners[id].speed == SPEED_60KM_H_60ms)
+          {
+            if(random_number >= 0.6)
+              runners[id].speed = SPEED_30KM_H_60ms;
+          }
+      } 
   }
 
-/* Vê-se o corredor deve quebrar ou não e sinaliza para a thread coordenadora pela pilha current_lap_broken_runners*/
+/* Vê-se o corredor deve quebrar ou não e sinaliza para a thread coordenadora fazendo push para a pilha current_lap_broken_runners*/
 bool break_with_chance(unsigned int id)
   {
     double random_number = rand()/(1.0*RAND_MAX);
@@ -203,7 +207,7 @@ void move_forward(int id)
         pista[current_position][current_line] = EMPTY_POSITION_VALUE;
         runners[id].pista_position = possible_next_position;
       }
-    else if(runners[id].speed != SPEED_30KM_H)
+    else if(runners[id].speed != SPEED_30KM_H_60ms)
       {
         for(int i = current_line + 1; i < MAX_RUNNERS_PER_METER; i++)
           {
@@ -283,44 +287,25 @@ void set_runner_rank(unsigned int id)
 void * runner_thread(void * a)
   {
     int* id = (int*)a;
-    speed current_speed = runners[*id].speed;
     unsigned long long int iterations = 0;
+    bool broke = false;
     while(1)
       {
         if(runners[*id].started)
           {
-            switch(current_speed)
+            if(iterations % runners[*id].speed == 0)
               {
-                case SPEED_60KM_H:
-                  move_forward(*id);
-                  if(runners[*id].pista_position == TRACK_START) // uma volta se passou 
+                move_forward(*id);
+                if(runners[*id].pista_position == TRACK_START) // uma volta se passou 
+                {
+                  determine_speed(*id);
+                  if(runners[*id].lap % 6 == 0 && runners[*id].lap != 0)
                     {
-                      current_speed = determine_speed(*id);
-                      if(runners[*id].lap % 6 == 0 && runners[*id].lap != 0)
-                        {
-                          if(break_with_chance(*id))
-                            break;
-                        }
-                      set_runner_rank(*id);
+                      broke = break_with_chance(*id);
                     }
-                  break;
-
-                case SPEED_30KM_H:
-                  if(iterations % 2 == 0)
-                    {
-                      move_forward(*id);
-                      if(runners[*id].pista_position == TRACK_START) // uma volta se passou 
-                        {
-                          current_speed = determine_speed(*id);
-                          if(runners[*id].lap % 6 == 0 && runners[*id].lap != 0)
-                            {
-                              if(break_with_chance(*id))
-                                break;
-                            }
-                          set_runner_rank(*id);
-                        }
-                    }
-                  break;
+                  if(!broke)
+                    set_runner_rank(*id);
+                }
               }
             iterations++;
           }
@@ -342,7 +327,7 @@ void * coordinator_thread(void * a)
     int* runner_count = (int*)a;
     int started_runners = 0;
     int alternate_start_position = 0;
-    int aux;
+    bool aux = false;
     while(1)
       {
         for(int i = 0; i < *runner_count; i++)
@@ -371,12 +356,6 @@ void * coordinator_thread(void * a)
         if(debug)
           {
             print_pista();
-            fprintf(stderr, "\nper_lap_runners[current_lap]: %d\n", per_lap_runners[current_lap]);
-            fprintf(stderr, "\nper_lap_rank[current_lap].size: %d\n", per_lap_rank[current_lap].size);
-            fprintf(stderr, "\nrunners_left: %d\n", runners_left);
-            fprintf(stderr, "Volta %d: ", current_lap);
-            print_pile(per_lap_rank[current_lap].next);
-            fprintf(stderr, "\n");
           }
 
         /* Uma volta se passou. current_lap é a volta em que o último corredor está */
@@ -384,13 +363,8 @@ void * coordinator_thread(void * a)
           {
             fprintf(stderr, "Volta %d: ", current_lap);
             print_pile(per_lap_rank[current_lap].next);
-            fprintf(stderr, "per_lap_runners[current_lap]: %d, per_lap_rank[current_lap].size: %d\n", per_lap_runners[current_lap], per_lap_rank[current_lap].size);
-            if(runners_left == 1 && per_lap_rank[current_lap].size != 1)
-              {
-                fprintf(stderr, "Erro");
-                exit(1);
-              }
-            else if(runners_left == 1)
+            fprintf(stderr, "\n");
+            if(runners_left == 1)
               {
                 int last_positioned_id = per_lap_rank[current_lap].next->which_runner;
                 remove_runner(last_positioned_id, iterations, true);
@@ -401,25 +375,51 @@ void * coordinator_thread(void * a)
                 int last_positioned_id = per_lap_rank[current_lap].next->which_runner;
                 remove_runner(last_positioned_id, iterations, true);
               }
-            if(USE_VARIABLE_QUANTUM)
+            else if(per_lap_rank[current_lap].size == 2) // volta par 
               {
-                if(runners_left == 160)
+                variable_quantum = 1000000;
+                double random_number = rand()/(1.0*RAND_MAX);
+                int chosen;
+                int not_chosen;
+                if(random_number >= 0.5)
+                  {
+                    chosen = pop(&per_lap_rank[current_lap]);
+                    not_chosen = pop(&per_lap_rank[current_lap]);
+                  }
+                else
+                  {
+                    not_chosen = pop(&per_lap_rank[current_lap]);
+                    chosen = pop(&per_lap_rank[current_lap]);
+                  }
+                random_number = rand()/(1.0*RAND_MAX);
+                if(random_number > 0)
+                  {
+                    fprintf(stderr, "chosen %d: \n", chosen);
+                    fprintf(stderr, "not chosen %d: \n", not_chosen);
+                    runners[chosen].speed = SPEED_90KM_H_20ms;
+                    if(runners[not_chosen].speed == SPEED_30KM_H_60ms)
+                      runners[not_chosen].speed = SPEED_30KM_H_20ms;
+                    else
+                      runners[not_chosen].speed = SPEED_60KM_H_20ms;
+                    runners[chosen].at_two_last_laps = true;
+                    runners[not_chosen].at_two_last_laps = true;
+                  }  
+              }
+            if(USE_VARIABLE_QUANTUM && aux)
+              {
+                if(runners_left <= 160)
                   {
                     variable_quantum = 100;
                   }
-                else if(runners_left == 300)
+                else if(runners_left <= 300)
                   {
                     variable_quantum = 500;
                   }
               }
             current_lap++;
           }
-        else if(per_lap_rank[current_lap].size >= per_lap_runners[current_lap])
-          {
-            pop(&per_lap_rank[current_lap]); 
-          }
         /* Retira corredores que quebraram na última volta */
-        while(current_lap_broken_runners->size > 0 && runners_left > 5)
+        while(current_lap_broken_runners->size > 0 && per_lap_runners[current_lap] > 5)
           {
             unsigned int broken = pop(current_lap_broken_runners);
             remove_runner(broken, iterations, false);
@@ -445,9 +445,13 @@ int main(int argc, char *argv[])
     variable_quantum = QUANTUM_us;
     if(USE_VARIABLE_QUANTUM)
       {
-        if(thread_count > 300)
+        if(thread_count >= 300)
           {
             variable_quantum = 1000;
+          }
+        else if(thread_count > 160)
+          {
+            variable_quantum = 500;
           }
         else
           {
@@ -504,21 +508,16 @@ int main(int argc, char *argv[])
     (*race_final_rank).next = NULL;
     (*race_final_rank).which_runner = -1;
 
-    /* inicializando pilha de corredores que ganham antes dos mais atrasados serem eliminados */ // DELETAR
-    race_early_winners = malloc(sizeof(runner_pile_t));
-    (*race_early_winners).size = 0;
-    (*race_early_winners).next = NULL;
-    (*race_early_winners).which_runner = -1;
-
     /* iniciando threads corredoras*/
     for(int i = 0; i < thread_count; i++)
       {
         runners[i].runner_id = i;
         runners[i].started = false;
         runners[i].lost = false;
-        runners[i].speed = SPEED_30KM_H;
+        runners[i].speed = SPEED_30KM_H_60ms;
         runners[i].keep_going = false;
         runners[i].arrive = false;
+        runners[i].at_two_last_laps = false;
         pthread_create(&runners[i].thread_id, NULL, runner_thread, &runners[i].runner_id);
       }
     pthread_t coord;
