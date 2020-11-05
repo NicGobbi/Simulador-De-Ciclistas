@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define QUANTUM_us 1000000
+#define QUANTUM_us 1000
 #define USE_VARIABLE_QUANTUM 0
 
 #define MAX_RUNNERS_PER_METER 10

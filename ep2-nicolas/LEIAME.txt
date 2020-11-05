@@ -1,0 +1,16 @@
+Para compilar o ep basta rodar:
+gcc ep2.c -o main.exe -lpthread
+
+Para rodar:
+./ep2.exe d n
+
+Para rodar no modo debug:
+./ep2.exe d n -d
+
+modificando tempo de simulação:
+Fazendo alguns testes no meu computador 4 cores percebi que para o programa ser mais eficiente
+os usleeps da barreira de sincronização deveriam depender da quantidade de threads existentes.
+Assim, para controlar esta feature basta alterar USE_VARIABLE_QUANTUM (linha 9). Por default ela está desligada.
+
+Para facilitar a análise do simulador basta modificar o QUANTUM_us (linha 8), colocando o valor em 500000 em conjunto da flag -d
+fica bem fácil de entender o que está acontecendo na simulação.
