@@ -5,12 +5,13 @@
 #include <stdbool.h>
 #include <string.h>
 
+#define QUANTUM_us 1000
+#define USE_VARIABLE_QUANTUM 0
+
 #define MAX_RUNNERS_PER_METER 10
 #define MAX_THREADS_STARTED 5
 #define RANK_TABLE_ENTRIES_PER_REALLOC 5
 #define EMPTY_POSITION_VALUE -1
-#define QUANTUM_us 1000
-#define USE_VARIABLE_QUANTUM 1
 #define TRACK_START 0
 #define INITIAL_LAP 0
 
@@ -203,11 +204,21 @@ void move_forward(int id)
       }
     if(pista[possible_next_position][current_line] == EMPTY_POSITION_VALUE)
       {
-        pista[possible_next_position][current_line] = id;
-        pista[current_position][current_line] = EMPTY_POSITION_VALUE;
-        runners[id].pista_position = possible_next_position;
+        if(current_line != 0 && pista[possible_next_position][current_line - 1] == EMPTY_POSITION_VALUE && pista[current_position][current_line - 1] == EMPTY_POSITION_VALUE && runners[id].lap != 0)
+          {
+            pista[possible_next_position][current_line - 1] = id;
+            pista[current_position][current_line] = EMPTY_POSITION_VALUE;
+            runners[id].pista_position = possible_next_position;
+            runners[id].pista_line = current_line - 1;
+          }
+        else
+          {
+            pista[possible_next_position][current_line] = id;
+            pista[current_position][current_line] = EMPTY_POSITION_VALUE;
+            runners[id].pista_position = possible_next_position;
+          }
       }
-    else if(runners[id].speed != SPEED_30KM_H_60ms)
+    else if(runners[id].speed != SPEED_30KM_H_60ms || runners[id].at_two_last_laps)
       {
         for(int i = current_line + 1; i < MAX_RUNNERS_PER_METER; i++)
           {
@@ -259,7 +270,7 @@ void remove_runner(int id, int current_iteration, bool lost)
       }
   }
 
-/* Funcao chamada pelo corredor para adicionar a sua posição em determinada volta na pilha correspondente a volta */
+/* Funcao chamada pelo corredor para adicionar a sua posição em determinada volta na pilha de ranks correspondente a volta */
 void set_runner_rank(unsigned int id)
   {
     pthread_mutex_lock(&rank_lock);
@@ -327,7 +338,6 @@ void * coordinator_thread(void * a)
     int* runner_count = (int*)a;
     int started_runners = 0;
     int alternate_start_position = 0;
-    bool aux = false;
     while(1)
       {
         for(int i = 0; i < *runner_count; i++)
@@ -358,7 +368,7 @@ void * coordinator_thread(void * a)
             print_pista();
           }
 
-        /* Uma volta se passou. current_lap é a volta em que o último corredor está */
+        /* Uma volta se passou. "current_lap" é a volta em que o corredor mais atrasado está */
         if(per_lap_rank[current_lap].size == per_lap_runners[current_lap])
           {
             fprintf(stderr, "Volta %d: ", current_lap);
@@ -375,9 +385,8 @@ void * coordinator_thread(void * a)
                 int last_positioned_id = per_lap_rank[current_lap].next->which_runner;
                 remove_runner(last_positioned_id, iterations, true);
               }
-            else if(per_lap_rank[current_lap].size == 2) // volta par 
+            else if(per_lap_rank[current_lap].size == 2) // ultimas duas voltas
               {
-                variable_quantum = 1000000;
                 double random_number = rand()/(1.0*RAND_MAX);
                 int chosen;
                 int not_chosen;
@@ -392,10 +401,8 @@ void * coordinator_thread(void * a)
                     chosen = pop(&per_lap_rank[current_lap]);
                   }
                 random_number = rand()/(1.0*RAND_MAX);
-                if(random_number > 0)
+                if(random_number > 0.9)
                   {
-                    fprintf(stderr, "chosen %d: \n", chosen);
-                    fprintf(stderr, "not chosen %d: \n", not_chosen);
                     runners[chosen].speed = SPEED_90KM_H_20ms;
                     if(runners[not_chosen].speed == SPEED_30KM_H_60ms)
                       runners[not_chosen].speed = SPEED_30KM_H_20ms;
@@ -405,7 +412,7 @@ void * coordinator_thread(void * a)
                     runners[not_chosen].at_two_last_laps = true;
                   }  
               }
-            if(USE_VARIABLE_QUANTUM && aux)
+            if(USE_VARIABLE_QUANTUM)
               {
                 if(runners_left <= 160)
                   {
